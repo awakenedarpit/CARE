@@ -1,33 +1,406 @@
-import { useAuth } from "@/_core/hooks/useAuth";
-import { Button } from "@/components/ui/button";
-import { Loader2 } from "lucide-react";
-import { Streamdown } from 'streamdown';
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  ChevronDown,
+  Clipboard,
+  Clock3,
+  Copy,
+  Cross,
+  ExternalLink,
+  HeartPulse,
+  LocateFixed,
+  MapPin,
+  Mic,
+  Navigation,
+  Phone,
+  Radio,
+  RefreshCw,
+  Share2,
+  ShieldCheck,
+  Siren,
+  Sparkles,
+  StopCircle,
+  UserRound,
+  WifiOff,
+} from "lucide-react";
+import type { ActionRecord, IncidentRecord, Recommendation } from "@shared/carebridge";
 
-/**
- * All content in this page are only for example, replace with your own feature implementation
- * When building pages, remember your instructions in Frontend Workflow, Frontend Best Practices, Design Guide and Common Pitfalls
- */
+const DEMO_REPORT = "Mere father ko saans lene mein bahut dikkat hai aur chest mein pain hai.";
+const DEMO_LOCATION = { latitude: 12.9716, longitude: 77.5946, label: "Demo location · Bengaluru", source: "demo" as const };
+
+type Step = "ready" | "report" | "results";
+type LocationState = { latitude: number; longitude: number; label: string; source: "browser" | "demo" | "manual" };
+type SpeechRecognitionLike = {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  start: () => void;
+  stop: () => void;
+  onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+};
+
+type WindowWithSpeech = Window & {
+  SpeechRecognition?: new () => SpeechRecognitionLike;
+  webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+};
+
+const actionNames: Record<ActionRecord["actionType"], string> = {
+  CALL_DOCTOR: "Call doctor",
+  CALL_112: "Call 112",
+  NAVIGATE: "Navigate",
+  SHARE_LOCATION: "Share location",
+  COPY_SUMMARY: "Copy handoff summary",
+};
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error("CareBridge could not complete that step.");
+  return response.json() as Promise<T>;
+}
+
+function urgencyClasses(urgency: Recommendation["incident"]["urgency"]) {
+  if (urgency === "EMERGENCY") return "bg-[#e8505b] text-white";
+  if (urgency === "URGENT") return "bg-[#f59e0b] text-[#3e2600]";
+  return "bg-[#d9f99d] text-[#1f3811]";
+}
+
+function formatPhone(phone: string) {
+  return phone.length > 8 ? `${phone.slice(0, 3)} ${phone.slice(3, 7)} ${phone.slice(7)}` : phone;
+}
+
 export default function Home() {
-  // The useAuth hook provides authentication state.
-  // To implement login/logout, call logout(), or start login from an event
-  // handler: onClick={() => startLogin()} (imported from "@/const"). Never call
-  // startLogin() during render (no href={startLogin()}) — it mints a one-time
-  // nonce cookie and must run only at the moment of navigation.
-  let { user, loading, error, isAuthenticated, logout } = useAuth();
+  const [step, setStep] = useState<Step>("ready");
+  const [report, setReport] = useState("");
+  const [patientRelation, setPatientRelation] = useState("Father");
+  const [location, setLocation] = useState<LocationState>(DEMO_LOCATION);
+  const [locationNotice, setLocationNotice] = useState("Demo location is ready. You can use your location instead.");
+  const [isLocating, setIsLocating] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [recommendation, setRecommendation] = useState<IncidentRecord | null>(null);
+  const [error, setError] = useState("");
+  const [offline, setOffline] = useState(() => typeof navigator !== "undefined" && !navigator.onLine);
+  const [copied, setCopied] = useState(false);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
-  // If theme is switchable in App.tsx, we can implement theme toggling like this:
-  // const { theme, toggleTheme } = useTheme();
+  useEffect(() => {
+    const handleOnline = () => setOffline(false);
+    const handleOffline = () => setOffline(true);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      recognitionRef.current?.stop();
+    };
+  }, []);
+
+  const summaryText = useMemo(() => {
+    if (!recommendation) return "";
+    const handoff = recommendation.handoff;
+    return [
+      "CAREBRIDGE EMERGENCY HANDOFF",
+      `Patient relation: ${handoff.patientRelation}`,
+      `Reported concerns: ${handoff.reportedConcerns.join(", ") || "No specific concern identified"}`,
+      `Urgency: ${handoff.urgency}`,
+      `Recommended facility: ${handoff.recommendedFacility}`,
+      `Recommended clinician: ${handoff.recommendedClinician}`,
+      `Location: ${handoff.location}`,
+      `Current time: ${handoff.currentTime}`,
+      handoff.disclaimer,
+    ].join("\n");
+  }, [recommendation]);
+
+  const logAction = async (actionType: ActionRecord["actionType"]) => {
+    if (!recommendation) return;
+    try {
+      await postJson("/api/actions", {
+        incidentId: recommendation.id,
+        doctorId: recommendation.recommendedDoctor?.id,
+        hospitalId: recommendation.recommendedFacility?.id,
+        actionType,
+      });
+    } catch {
+      // An action should never be blocked by logging failure.
+    }
+  };
+
+  const requestLocation = () => {
+    if (!navigator.geolocation) {
+      setLocationNotice("Browser location is unavailable. Demo location remains active.");
+      return;
+    }
+    setIsLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        setLocation({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          label: "Current browser location",
+          source: "browser",
+        });
+        setLocationNotice("Using your current browser location for approximate matching.");
+        setIsLocating(false);
+      },
+      () => {
+        setLocation(DEMO_LOCATION);
+        setLocationNotice("Location permission was not available. Demo location remains active.");
+        setIsLocating(false);
+      },
+      { enableHighAccuracy: false, timeout: 7000, maximumAge: 300000 },
+    );
+  };
+
+  const startVoice = () => {
+    const speechWindow = window as WindowWithSpeech;
+    const Recognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+    if (!Recognition) {
+      setLocationNotice("Voice input is not available in this browser. Type instead.");
+      return;
+    }
+    const recognition = new Recognition();
+    recognition.lang = "en-IN";
+    recognition.interimResults = false;
+    recognition.continuous = false;
+    recognition.onresult = event => {
+      const transcript = event.results[0]?.[0]?.transcript ?? "";
+      if (transcript) setReport(previous => previous ? `${previous} ${transcript}` : transcript);
+    };
+    recognition.onend = () => setIsListening(false);
+    recognition.onerror = () => setIsListening(false);
+    recognitionRef.current = recognition;
+    setIsListening(true);
+    recognition.start();
+  };
+
+  const submitIncident = async (text = report) => {
+    if (!text.trim()) {
+      setError("Tell us what is happening, or use the demo scenario.");
+      return;
+    }
+    setError("");
+    setIsSubmitting(true);
+    try {
+      const result = await postJson<IncidentRecord>("/api/incident", {
+        rawText: text.trim(),
+        patientRelation,
+        location,
+      });
+      setRecommendation(result);
+      setStep("results");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch {
+      setError("The emergency flow is temporarily unavailable. Call 112 directly if there is immediate danger.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const shareLocation = async () => {
+    if (!recommendation) return;
+    const facility = recommendation.recommendedFacility;
+    const link = facility ? `https://www.google.com/maps/dir/?api=1&destination=${facility.latitude},${facility.longitude}` : `https://www.google.com/maps/search/?api=1&query=${location.latitude},${location.longitude}`;
+    const shareData = { title: "CareBridge emergency location", text: `${summaryText}\n\nDirections: ${link}`, url: link };
+    await logAction("SHARE_LOCATION");
+    try {
+      if (navigator.share) {
+        await navigator.share(shareData);
+        return;
+      }
+      await navigator.clipboard.writeText(`${summaryText}\n\nDirections: ${link}`);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2400);
+    } catch {
+      // User cancelled the native share sheet; no error should be shown.
+    }
+  };
+
+  const copySummary = async () => {
+    await logAction("COPY_SUMMARY");
+    try {
+      await navigator.clipboard.writeText(summaryText);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2400);
+    } catch {
+      setError("Copy is not available here. Select the handoff text manually.");
+    }
+  };
+
+  const navigateToFacility = async () => {
+    if (!recommendation?.recommendedFacility) return;
+    await logAction("NAVIGATE");
+    const facility = recommendation.recommendedFacility;
+    window.open(`https://www.google.com/maps/dir/?api=1&origin=${location.latitude},${location.longitude}&destination=${facility.latitude},${facility.longitude}`, "_blank", "noopener,noreferrer");
+  };
+
+  const reset = () => {
+    setStep("ready");
+    setRecommendation(null);
+    setReport("");
+    setError("");
+    setCopied(false);
+  };
+
+  const start = () => {
+    setStep("report");
+    setReport("");
+    setError("");
+  };
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <main>
-        {/* Example: lucide-react for icons */}
-        <Loader2 className="animate-spin" />
-        Example Page
-        {/* Example: Streamdown for markdown rendering */}
-        <Streamdown>Any **markdown** content</Streamdown>
-        <Button variant="default">Example Button</Button>
+    <div className="min-h-screen bg-[#f5f2eb] text-[#202b2c]">
+      <header className="border-b border-[#d9d5cc] bg-[#f5f2eb]/95 px-4 py-4 backdrop-blur sm:px-8">
+        <div className="mx-auto flex max-w-6xl items-center justify-between">
+          <button className="flex items-center gap-3 text-left" onClick={reset} aria-label="Return to CareBridge home">
+            <span className="grid h-10 w-10 place-items-center rounded-2xl bg-[#133b3a] text-[#fbf7ed] shadow-[0_8px_24px_rgba(19,59,58,0.18)]"><Cross size={20} strokeWidth={2.5} /></span>
+            <span>
+              <span className="block font-display text-xl font-semibold tracking-tight">CareBridge</span>
+              <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-[#6a7773]">Emergency navigator</span>
+            </span>
+          </button>
+          <div className="flex items-center gap-2 text-xs font-semibold text-[#6a7773]">
+            {offline ? <><WifiOff size={15} /> Offline mode</> : <><ShieldCheck size={15} className="text-[#2e8069]" /> Safety-first</>}
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-6xl px-4 pb-16 pt-8 sm:px-8 sm:pt-12">
+        {step === "ready" && <ReadyScreen onStart={start} onDemo={() => { setReport(DEMO_REPORT); setStep("report"); }} />}
+        {step === "report" && (
+          <ReportScreen
+            report={report}
+            setReport={setReport}
+            patientRelation={patientRelation}
+            setPatientRelation={setPatientRelation}
+            isListening={isListening}
+            isSubmitting={isSubmitting}
+            onVoice={startVoice}
+            onSubmit={() => submitIncident()}
+            onUseDemo={() => setReport(DEMO_REPORT)}
+            onBack={() => setStep("ready")}
+            location={location}
+            locationNotice={locationNotice}
+            isLocating={isLocating}
+            onLocation={requestLocation}
+            error={error}
+          />
+        )}
+        {step === "results" && recommendation && (
+          <ResultsScreen
+            recommendation={recommendation}
+            offline={offline}
+            copied={copied}
+            summaryText={summaryText}
+            onBack={reset}
+            onCallDoctor={async () => { await logAction("CALL_DOCTOR"); if (recommendation.recommendedDoctor) window.location.href = `tel:${recommendation.recommendedDoctor.phone}`; }}
+            onCall112={async () => { await logAction("CALL_112"); window.location.href = "tel:112"; }}
+            onNavigate={navigateToFacility}
+            onShare={shareLocation}
+            onCopy={copySummary}
+          />
+        )}
       </main>
+
+      <footer className="mx-auto max-w-6xl px-4 pb-8 text-center text-xs leading-5 text-[#7b827e] sm:px-8">
+        CareBridge is not a diagnostic or treatment system. Guidance is based on the information reported by the user. Seek professional medical care for emergencies.
+      </footer>
     </div>
   );
+}
+
+function ReadyScreen({ onStart, onDemo }: { onStart: () => void; onDemo: () => void }) {
+  return (
+    <section className="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-20 lg:py-8">
+      <div className="relative">
+        <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-[#c5d7ca] bg-[#e8f0e8] px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-[#275d51]"><Radio size={14} /> No login. No diagnosis.</div>
+        <h1 className="max-w-xl font-display text-5xl font-semibold leading-[0.98] tracking-[-0.05em] text-[#133b3a] sm:text-7xl">One clear next step when every second feels loud.</h1>
+        <p className="mt-6 max-w-lg text-lg leading-8 text-[#596765]">Speak or type what is happening. CareBridge turns the report into a safety-focused handoff, trusted emergency resources, and actions you can choose.</p>
+        <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <button className="cb-primary-action group" onClick={onStart}><Siren size={22} /> NEED EMERGENCY HELP <ArrowRight size={19} className="transition-transform group-hover:translate-x-1" /></button>
+          <button className="cb-secondary-action" onClick={onDemo}><Sparkles size={17} /> Try the demo scenario</button>
+        </div>
+        <div className="mt-8 flex flex-wrap gap-x-5 gap-y-2 text-xs font-semibold text-[#6e7c77]"><span className="flex items-center gap-2"><Check size={15} className="text-[#2f806a]" /> Type fallback always available</span><span className="flex items-center gap-2"><Check size={15} className="text-[#2f806a]" /> Demo location if needed</span></div>
+      </div>
+      <div className="relative overflow-hidden rounded-[2.4rem] bg-[#133b3a] p-6 text-[#f8f3e8] shadow-[0_30px_80px_rgba(19,59,58,0.22)] sm:p-9">
+        <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full border-[26px] border-[#d7a943]/25" />
+        <div className="absolute -bottom-28 -left-20 h-64 w-64 rounded-full border-[34px] border-[#e8505b]/20" />
+        <div className="relative">
+          <div className="flex items-center justify-between text-xs font-bold uppercase tracking-[0.16em] text-[#bbd3c8]"><span>CareBridge protocol</span><HeartPulse size={18} /></div>
+          <div className="mt-10 space-y-4">
+            {["Understand the report", "Apply safety rules", "Match trusted resources", "Choose your action"].map((label, index) => <div className="flex items-center gap-4" key={label}><span className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${index === 0 ? "bg-[#d7a943] text-[#133b3a]" : "bg-[#285d58] text-[#cfe8da]"} font-bold`}>{String(index + 1).padStart(2, "0")}</span><div><p className="font-semibold">{label}</p><p className="mt-0.5 text-sm text-[#aac8be]">{index === 0 ? "Voice or typed input" : index === 1 ? "Deterministic, not diagnostic" : index === 2 ? "No invented facilities" : "Call, navigate, share"}</p></div></div>)}
+          </div>
+          <div className="mt-10 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm leading-6 text-[#d9e7df]"><AlertTriangle size={17} className="mb-2 text-[#f1cb67]" />If someone is in immediate danger, call <strong>112</strong> now. CareBridge never asks you to delay professional help.</div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ReportScreen(props: {
+  report: string; setReport: (value: string) => void; patientRelation: string; setPatientRelation: (value: string) => void;
+  isListening: boolean; isSubmitting: boolean; onVoice: () => void; onSubmit: () => void; onUseDemo: () => void; onBack: () => void;
+  location: LocationState; locationNotice: string; isLocating: boolean; onLocation: () => void; error: string;
+}) {
+  return (
+    <section className="mx-auto max-w-3xl">
+      <button className="cb-back-link" onClick={props.onBack}><ArrowLeft size={16} /> Back</button>
+      <div className="mt-6 flex items-start justify-between gap-6"><div><div className="cb-eyebrow"><span className="cb-step-dot bg-[#d7a943]" /> Step 1 of 2 · Tell us what is happening</div><h1 className="mt-3 font-display text-4xl font-semibold tracking-[-0.04em] text-[#133b3a] sm:text-5xl">What is happening right now?</h1><p className="mt-4 text-base leading-7 text-[#66716e]">Use simple words. Mention the person and the most important concern.</p></div><div className="hidden rounded-2xl bg-[#e8f0e8] p-3 text-[#2e8069] sm:block"><Mic size={22} /></div></div>
+      <div className="mt-8 rounded-[2rem] border border-[#ded9ce] bg-white p-5 shadow-[0_18px_45px_rgba(34,49,47,0.06)] sm:p-7">
+        <div className="flex items-center justify-between gap-3"><label className="cb-label" htmlFor="relation">Who needs help?</label><button className="text-xs font-bold text-[#2e8069]" onClick={props.onUseDemo}>Use demo report</button></div>
+        <div className="mt-2 flex flex-wrap gap-2">{["Father", "Mother", "Child", "Myself", "Someone else"].map(option => <button key={option} className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${props.patientRelation === option ? "border-[#133b3a] bg-[#133b3a] text-white" : "border-[#d9d5cc] bg-[#faf9f5] text-[#5e6a67] hover:border-[#94aaa0]"}`} onClick={() => props.setPatientRelation(option)}>{option}</button>)}</div>
+        <label className="cb-label mt-7 block" htmlFor="incident-report">Describe the concern</label>
+        <div className="relative mt-2"><textarea id="incident-report" value={props.report} onChange={event => props.setReport(event.target.value)} placeholder="For example: Mere father ko saans lene mein bahut dikkat hai aur chest mein pain hai." className="min-h-44 w-full resize-none rounded-2xl border border-[#d9d5cc] bg-[#faf9f5] px-4 py-4 pr-16 text-base leading-7 text-[#202b2c] outline-none transition placeholder:text-[#9aa09b] focus:border-[#568a78] focus:ring-4 focus:ring-[#568a78]/10" />
+          <button className={`absolute bottom-4 right-4 grid h-11 w-11 place-items-center rounded-full ${props.isListening ? "bg-[#e8505b] text-white" : "bg-[#dcebe0] text-[#286252]"}`} onClick={props.onVoice} aria-label={props.isListening ? "Stop listening" : "Speak your concern"}>{props.isListening ? <StopCircle size={20} /> : <Mic size={20} />}</button>
+        </div>
+        <div className="mt-3 flex items-center gap-2 text-xs font-semibold text-[#79827f]"><Mic size={14} /> Voice works where supported · <button onClick={() => document.getElementById("incident-report")?.focus()} className="text-[#2e8069]">Type instead</button></div>
+        <div className="mt-7 border-t border-[#ebe7df] pt-5"><div className="flex items-center justify-between gap-4"><div><p className="cb-label">Your location</p><p className="mt-1 text-sm text-[#65716d]">{props.locationNotice}</p></div><button className="cb-location-button" onClick={props.onLocation} disabled={props.isLocating}>{props.isLocating ? <RefreshCw size={16} className="animate-spin" /> : <LocateFixed size={16} />} {props.isLocating ? "Locating" : "Use my location"}</button></div><div className="mt-3 flex items-center gap-2 rounded-xl bg-[#f3f7ef] px-3 py-2 text-xs font-bold text-[#47705b]"><MapPin size={14} /> {props.location.label}</div></div>
+        {props.error && <div className="mt-5 rounded-xl border border-[#f5b8b8] bg-[#fff3f2] px-4 py-3 text-sm font-semibold text-[#a7383f]">{props.error}</div>}
+        <button className="cb-primary-action mt-7 w-full justify-center" onClick={props.onSubmit} disabled={props.isSubmitting}>{props.isSubmitting ? <><RefreshCw size={20} className="animate-spin" /> Building your handoff…</> : <>Continue to safe next steps <ArrowRight size={19} /></>}</button>
+      </div>
+      <div className="mt-5 flex items-start gap-3 rounded-2xl bg-[#e8f0e8] p-4 text-sm leading-6 text-[#396050]"><ShieldCheck size={18} className="mt-1 shrink-0" /><span>CareBridge uses rules to identify urgency signals. It does not diagnose, prescribe, or recommend treatment.</span></div>
+    </section>
+  );
+}
+
+function ResultsScreen(props: {
+  recommendation: IncidentRecord; offline: boolean; copied: boolean; summaryText: string; onBack: () => void; onCallDoctor: () => void; onCall112: () => void; onNavigate: () => void; onShare: () => void; onCopy: () => void;
+}) {
+  const { recommendation } = props;
+  const facility = recommendation.recommendedFacility;
+  const doctor = recommendation.recommendedDoctor;
+  return (
+    <section>
+      <div className="flex flex-wrap items-center justify-between gap-4"><button className="cb-back-link" onClick={props.onBack}><ArrowLeft size={16} /> New report</button><div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-[#6d7974]"><Clock3 size={14} /> Handoff ready</div></div>
+      <div className="mt-6 grid gap-7 lg:grid-cols-[0.95fr_1.05fr] lg:items-start">
+        <div><div className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-black uppercase tracking-[0.16em] ${urgencyClasses(recommendation.incident.urgency)}`}><Siren size={15} /> {recommendation.incident.urgency}</div><h1 className="mt-4 max-w-xl font-display text-4xl font-semibold leading-tight tracking-[-0.04em] text-[#133b3a] sm:text-6xl">Here is the safest next step.</h1><p className="mt-4 max-w-xl text-base leading-7 text-[#66716e]">Based only on what you reported. This is navigation support, not a diagnosis.</p>
+          {recommendation.incident.urgency === "EMERGENCY" && <div className="mt-6 flex items-start gap-3 rounded-2xl border border-[#f1b0b2] bg-[#fff2f1] p-4 text-sm font-semibold leading-6 text-[#91363d]"><AlertTriangle size={19} className="mt-1 shrink-0" /><span>{recommendation.incident.safetyNote}</span></div>}
+          <div className="mt-7 grid grid-cols-2 gap-3 sm:grid-cols-4"><ActionButton icon={<Phone size={18} />} label="Call doctor" onClick={props.onCallDoctor} disabled={!doctor} /><ActionButton icon={<Siren size={18} />} label="Call 112" onClick={props.onCall112} danger /><ActionButton icon={<Navigation size={18} />} label="Navigate" onClick={props.onNavigate} disabled={!facility} /><ActionButton icon={<Share2 size={18} />} label={props.copied ? "Copied" : "Share"} onClick={props.onShare} /></div>
+          <button className="cb-112-banner mt-4 w-full" onClick={props.onCall112}><span className="grid h-10 w-10 place-items-center rounded-full bg-white/15"><Phone size={18} /></span><span className="flex-1 text-left"><strong className="block text-sm">If there is immediate danger, call 112 now.</strong><span className="text-xs text-white/70">This button opens your phone dialer. It does not simulate a call.</span></span><ArrowRight size={18} /></button>
+        </div>
+        <div className="rounded-[2rem] border border-[#ded9ce] bg-white p-5 shadow-[0_18px_45px_rgba(34,49,47,0.06)] sm:p-7"><div className="flex items-center justify-between gap-4"><div><div className="cb-eyebrow"><span className="cb-step-dot bg-[#2e8069]" /> Step 2 of 2 · Care connections</div><h2 className="mt-2 font-display text-2xl font-semibold text-[#133b3a]">What to do, where to go</h2></div><div className="rounded-2xl bg-[#e8f0e8] p-3 text-[#2e8069]"><HeartPulse size={22} /></div></div>
+          <div className="mt-6 space-y-3"><div className="rounded-2xl bg-[#f6f5ef] p-4"><div className="flex items-start gap-3"><MapPin size={18} className="mt-1 text-[#2e8069]" /><div className="min-w-0"><p className="cb-mini-heading">WHERE TO GO</p><p className="mt-1 font-semibold text-[#263534]">{facility?.name ?? "Use 112 for the closest emergency facility"}</p><p className="mt-1 text-sm leading-6 text-[#6d7774]">{facility?.address ?? "No verified facility matched this report."}</p>{facility && <p className="mt-2 text-xs font-bold text-[#2e8069]">Approx. {facility.distanceKm.toFixed(1)} km · {formatPhone(facility.phone)}</p>}</div></div></div><div className="rounded-2xl bg-[#f6f5ef] p-4"><div className="flex items-start gap-3"><UserRound size={18} className="mt-1 text-[#2e8069]" /><div className="min-w-0"><p className="cb-mini-heading">WHO CAN HELP</p><p className="mt-1 font-semibold text-[#263534]">{doctor?.name ?? "No verified clinician available"}</p><p className="mt-1 text-sm leading-6 text-[#6d7774]">{doctor ? `${doctor.specialty} · ${doctor.phoneLabel}` : "Use 112 and the emergency facility recommendation."}</p>{doctor && <p className="mt-2 text-xs font-bold text-[#2e8069]">Verified resource · last checked {new Date(doctor.lastVerifiedAt).toLocaleDateString()}</p>}</div></div></div><div className="rounded-2xl bg-[#f6f5ef] p-4"><div className="flex items-start gap-3"><Navigation size={18} className="mt-1 text-[#2e8069]" /><div><p className="cb-mini-heading">HOW TO GET THERE</p><p className="mt-1 font-semibold text-[#263534]">{facility ? "Open Google Maps directions" : "Call 112 for routing support"}</p><p className="mt-1 text-sm leading-6 text-[#6d7774]">{recommendation.location.label}. Navigation uses your chosen location and the trusted facility coordinates.</p></div></div></div></div>
+          {props.offline || recommendation.liveStatusUnavailable ? <div className="mt-4 rounded-xl border border-[#eadcb3] bg-[#fff8df] px-3 py-3 text-xs font-semibold leading-5 text-[#6f5c20]"><WifiOff size={14} className="mr-1 inline" /> {recommendation.fallbackMessage}</div> : null}
+        </div>
+      </div>
+      <div className="mt-8 grid gap-7 lg:grid-cols-[1.2fr_0.8fr]">
+        <div className="rounded-[2rem] border border-[#ded9ce] bg-white p-5 sm:p-7"><div className="flex items-center justify-between gap-3"><div><p className="cb-mini-heading">WHY THIS FACILITY?</p><h2 className="mt-2 font-display text-2xl font-semibold text-[#133b3a]">Transparent matching</h2></div><ShieldCheck size={22} className="text-[#2e8069]" /></div><div className="mt-5 grid gap-3 sm:grid-cols-2">{facility?.why.map((reason, index) => <div className="flex gap-3 rounded-xl bg-[#f6f5ef] p-3 text-sm leading-6 text-[#5e6b67]" key={reason}><span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[#dcebe0] text-xs font-black text-[#2e8069]">{index + 1}</span>{reason}</div>) ?? <p className="text-sm text-[#6d7774]">No facility explanation is available because no verified resource matched.</p>}</div><div className="mt-5 flex flex-wrap gap-2 text-xs font-bold text-[#6d7774]"><span className="rounded-full bg-[#edf3ee] px-3 py-2">30% emergency readiness</span><span className="rounded-full bg-[#edf3ee] px-3 py-2">30% category match</span><span className="rounded-full bg-[#edf3ee] px-3 py-2">15% status</span><span className="rounded-full bg-[#edf3ee] px-3 py-2">15% distance</span><span className="rounded-full bg-[#edf3ee] px-3 py-2">10% freshness</span></div></div>
+        <div className="rounded-[2rem] bg-[#133b3a] p-5 text-[#f8f3e8] shadow-[0_18px_45px_rgba(19,59,58,0.16)] sm:p-7"><div className="flex items-center justify-between"><div><p className="text-xs font-black uppercase tracking-[0.16em] text-[#bbd3c8]">Incident signal</p><p className="mt-2 font-display text-3xl font-semibold">{recommendation.incident.careCategory.replaceAll("_", " ")}</p></div><Sparkles size={22} className="text-[#f1cb67]" /></div><div className="mt-6 border-t border-white/10 pt-5"><p className="text-xs font-black uppercase tracking-[0.16em] text-[#bbd3c8]">Reported concerns</p><div className="mt-3 flex flex-wrap gap-2">{recommendation.incident.reportedConcerns.length ? recommendation.incident.reportedConcerns.map(concern => <span key={concern} className="rounded-full bg-white/10 px-3 py-2 text-sm text-[#e0ede6]">{concern}</span>) : <span className="text-sm text-[#c8d8d0]">No specific concern identified</span>}</div></div><div className="mt-6 rounded-2xl bg-white/7 p-4 text-sm leading-6 text-[#d5e4dc]">{recommendation.incident.safetyNote}</div></div>
+      </div>
+      <div className="mt-8 rounded-[2rem] border border-[#ded9ce] bg-[#fbfaf6] p-5 sm:p-7"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="cb-mini-heading">HANDOFF SUMMARY</p><h2 className="mt-2 font-display text-2xl font-semibold text-[#133b3a]">Ready to show a professional</h2></div><button className="cb-secondary-action" onClick={props.onCopy}><Copy size={16} /> {props.copied ? "Copied" : "Copy summary"}</button></div><pre className="mt-5 whitespace-pre-wrap font-sans text-sm leading-7 text-[#5c6965]">{props.summaryText}</pre><p className="mt-5 border-t border-[#e1ddd3] pt-4 text-xs font-bold leading-5 text-[#7b827e]">Not a diagnosis. Based only on information reported by the user.</p></div>
+    </section>
+  );
+}
+
+function ActionButton({ icon, label, onClick, disabled, danger = false }: { icon: React.ReactNode; label: string; onClick: () => void; disabled?: boolean; danger?: boolean }) {
+  return <button className={`group flex min-h-24 flex-col items-start justify-between rounded-2xl border p-3 text-left transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-45 ${danger ? "border-[#f1b0b2] bg-[#fff2f1] text-[#a33b41]" : "border-[#d9d5cc] bg-white text-[#33514b] hover:border-[#8eafa0]"}`} onClick={onClick} disabled={disabled}>{icon}<span className="flex w-full items-center justify-between gap-2 text-xs font-black uppercase tracking-[0.08em]">{label}<ArrowRight size={14} className="transition-transform group-hover:translate-x-0.5" /></span></button>;
 }

@@ -1,0 +1,11 @@
+{
+  "name": "CareBridge Emergency Navigator",
+  "short_name": "CareBridge",
+  "description": "A safety-first emergency healthcare navigation companion.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f2eb",
+  "theme_color": "#133b3a",
+  "lang": "en-IN",
+  "icons": []
+}

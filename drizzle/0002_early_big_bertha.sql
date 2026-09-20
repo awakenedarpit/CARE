@@ -1,0 +1,4 @@
+ALTER TABLE `actions` ADD CONSTRAINT `actions_incidentId_incidents_id_fk` FOREIGN KEY (`incidentId`) REFERENCES `incidents`(`id`) ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `actions` ADD CONSTRAINT `actions_doctorId_doctors_id_fk` FOREIGN KEY (`doctorId`) REFERENCES `doctors`(`id`) ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `actions` ADD CONSTRAINT `actions_hospitalId_hospitals_id_fk` FOREIGN KEY (`hospitalId`) REFERENCES `hospitals`(`id`) ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `doctors` ADD CONSTRAINT `doctors_hospitalId_hospitals_id_fk` FOREIGN KEY (`hospitalId`) REFERENCES `hospitals`(`id`) ON DELETE no action ON UPDATE no action;

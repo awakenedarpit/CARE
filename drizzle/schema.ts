@@ -1,17 +1,7 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
+import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, double, tinyint } from "drizzle-orm/mysql-core";
 
-/**
- * Core user table backing auth flow.
- * Extend this file with additional tables as your product grows.
- * Columns use camelCase to match both database fields and generated types.
- */
 export const users = mysqlTable("users", {
-  /**
-   * Surrogate primary key. Auto-incremented numeric value managed by the database.
-   * Use this for relations between tables.
-   */
   id: int("id").autoincrement().primaryKey(),
-  /** Manus OAuth identifier (openId) returned from the OAuth callback. Unique per user. */
   openId: varchar("openId", { length: 64 }).notNull().unique(),
   name: text("name"),
   email: varchar("email", { length: 320 }),
@@ -22,7 +12,60 @@ export const users = mysqlTable("users", {
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
 });
 
+export const hospitals = mysqlTable("hospitals", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  address: text("address").notNull(),
+  latitude: double("latitude").notNull(),
+  longitude: double("longitude").notNull(),
+  phone: varchar("phone", { length: 32 }).notNull(),
+  emergencyAvailable: tinyint("emergencyAvailable").notNull().default(0),
+  status: mysqlEnum("status", ["TRUSTED_RESOURCE", "UNVERIFIED"]).notNull().default("UNVERIFIED"),
+  capabilities: text("capabilities").notNull(),
+  isVerified: tinyint("isVerified").notNull().default(0),
+  lastVerifiedAt: timestamp("lastVerifiedAt").notNull(),
+  sourceUrl: text("sourceUrl").notNull(),
+  sourceLabel: varchar("sourceLabel", { length: 255 }).notNull(),
+});
+
+export const doctors = mysqlTable("doctors", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  phone: varchar("phone", { length: 32 }).notNull(),
+  phoneLabel: varchar("phoneLabel", { length: 255 }).notNull(),
+  specialty: varchar("specialty", { length: 255 }).notNull(),
+  hospitalId: varchar("hospitalId", { length: 64 }).notNull().references(() => hospitals.id),
+  isOnCall: tinyint("isOnCall").notNull().default(0),
+  isVerified: tinyint("isVerified").notNull().default(0),
+  lastVerifiedAt: timestamp("lastVerifiedAt").notNull(),
+  sourceUrl: text("sourceUrl").notNull(),
+  sourceLabel: varchar("sourceLabel", { length: 255 }).notNull(),
+});
+
+export const incidents = mysqlTable("incidents", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  patientRelation: varchar("patientRelation", { length: 100 }).notNull(),
+  rawText: text("rawText").notNull(),
+  language: varchar("language", { length: 80 }).notNull(),
+  urgency: mysqlEnum("urgency", ["EMERGENCY", "URGENT", "GENERAL"]).notNull(),
+  careCategory: varchar("careCategory", { length: 64 }).notNull(),
+  latitude: double("latitude").notNull(),
+  longitude: double("longitude").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export const actions = mysqlTable("actions", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  incidentId: varchar("incidentId", { length: 64 }).notNull().references(() => incidents.id),
+  doctorId: varchar("doctorId", { length: 64 }).references(() => doctors.id),
+  hospitalId: varchar("hospitalId", { length: 64 }).references(() => hospitals.id),
+  actionType: mysqlEnum("actionType", ["CALL_DOCTOR", "CALL_112", "NAVIGATE", "SHARE_LOCATION", "COPY_SUMMARY"]).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
-
-// TODO: Add your tables here
+export type Hospital = typeof hospitals.$inferSelect;
+export type Doctor = typeof doctors.$inferSelect;
+export type Incident = typeof incidents.$inferSelect;
+export type Action = typeof actions.$inferSelect;

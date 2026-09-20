@@ -1,28 +1,45 @@
+import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
+import { buildRecommendation, getDoctorRecommendations, getFacilityRecommendations } from "./services/carebridgeEngine";
+import { logAction } from "./services/actionLog";
+import { getIncident } from "./services/incidentStore";
+
+const locationInput = z.object({
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
+  label: z.string().optional(),
+  source: z.enum(["browser", "demo", "manual"]).optional(),
+}).optional();
 
 export const appRouter = router({
-    // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
   system: systemRouter,
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
-      return {
-        success: true,
-      } as const;
+      return { success: true } as const;
     }),
   }),
-
-  // TODO: add feature routers here, e.g.
-  // todo: router({
-  //   list: protectedProcedure.query(({ ctx }) =>
-  //     db.getUserTodos(ctx.user.id)
-  //   ),
-  // }),
+  incident: router({
+    create: publicProcedure.input(z.object({ rawText: z.string().min(1), patientRelation: z.string().optional(), location: locationInput })).mutation(({ input }) => buildRecommendation(input)),
+    get: publicProcedure.input(z.object({ incidentId: z.string() })).query(({ input }) => getIncident(input.incidentId)),
+  }),
+  facilities: router({
+    recommendations: publicProcedure.input(z.object({ latitude: z.number(), longitude: z.number(), category: z.string().optional() })).query(({ input }) => getFacilityRecommendations(input as Parameters<typeof getFacilityRecommendations>[0])),
+  }),
+  doctors: router({
+    recommendations: publicProcedure.input(z.object({ hospitalId: z.string(), category: z.string().optional() })).query(({ input }) => getDoctorRecommendations(input as Parameters<typeof getDoctorRecommendations>[0])),
+  }),
+  emergency: router({
+    recommendation: publicProcedure.input(z.object({ incidentId: z.string() })).query(({ input }) => getIncident(input.incidentId)),
+  }),
+  actions: router({
+    log: publicProcedure.input(z.object({ incidentId: z.string(), doctorId: z.string().optional(), hospitalId: z.string().optional(), actionType: z.enum(["CALL_DOCTOR", "CALL_112", "NAVIGATE", "SHARE_LOCATION", "COPY_SUMMARY"]) })).mutation(({ input }) => logAction(input)),
+  }),
 });
 
 export type AppRouter = typeof appRouter;
