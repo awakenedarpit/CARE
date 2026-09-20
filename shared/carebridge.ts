@@ -48,6 +48,8 @@ export interface Hospital {
   lastVerifiedAt: string;
   sourceUrl: string;
   sourceLabel: string;
+  dataSource?: "official" | "openstreetmap";
+  distanceKm?: number;
 }
 
 export interface Doctor {
@@ -84,6 +86,7 @@ export interface HandoffSummary {
 export interface Recommendation {
   incident: ParsedIncident;
   facilities: RankedHospital[];
+  liveFacilities: Hospital[];
   recommendedFacility: RankedHospital | null;
   recommendedDoctor: Doctor | null;
   location: { latitude: number; longitude: number; label: string; source: "browser" | "demo" | "manual" };

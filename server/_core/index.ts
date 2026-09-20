@@ -11,6 +11,7 @@ import { serveStatic, setupVite } from "./vite";
 import { buildRecommendation, getDoctorRecommendations, getFacilityRecommendations } from "../services/carebridgeEngine";
 import { getIncident } from "../services/incidentStore";
 import { logAction } from "../services/actionLog";
+import { findNearbyHospitals } from "../services/openStreetMap";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -41,11 +42,18 @@ async function startServer() {
   registerOAuthRoutes(app);
 
   // CareBridge REST API. These endpoints are public by design: emergency input must not require login.
-  app.post("/api/incident", (req, res) => {
+  app.post("/api/incident", async (req, res) => {
     try {
       const { rawText, patientRelation, location } = req.body ?? {};
       if (typeof rawText !== "string" || rawText.trim().length === 0) return res.status(400).json({ error: "rawText is required" });
-      return res.json(buildRecommendation({ rawText, patientRelation, location }));
+      const recommendation = buildRecommendation({ rawText, patientRelation, location });
+      const liveFacilities = recommendation.location.source === "browser" || recommendation.location.source === "manual"
+        ? await findNearbyHospitals(recommendation.location.latitude, recommendation.location.longitude)
+        : [];
+      const fallbackMessage = liveFacilities.length > 0
+        ? "Live emergency capacity unavailable. Showing nearby OpenStreetMap listings and cached verified resources."
+        : recommendation.fallbackMessage;
+      return res.json({ ...recommendation, liveFacilities, fallbackMessage });
     } catch (error) {
       console.error("[CareBridge] incident error", error);
       return res.status(500).json({ error: "Unable to create incident" });

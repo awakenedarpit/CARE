@@ -27,6 +27,7 @@ export function buildRecommendation(input: { rawText: string; patientRelation?: 
     createdAt: now.toISOString(),
     incident,
     facilities,
+    liveFacilities: [],
     recommendedFacility,
     recommendedDoctor,
     location,
