@@ -41,7 +41,7 @@ type SpeechRecognitionLike = {
   stop: () => void;
   onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
   onend: (() => void) | null;
-  onerror: (() => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
 };
 
 type WindowWithSpeech = Window & {
@@ -85,6 +85,7 @@ export default function Home() {
   const [locationNotice, setLocationNotice] = useState("Demo location is ready. You can use your location instead.");
   const [isLocating, setIsLocating] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [voiceNotice, setVoiceNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [recommendation, setRecommendation] = useState<IncidentRecord | null>(null);
   const [error, setError] = useState("");
@@ -162,10 +163,16 @@ export default function Home() {
   };
 
   const startVoice = () => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      setVoiceNotice("Voice input stopped. You can edit the text or type instead.");
+      return;
+    }
     const speechWindow = window as WindowWithSpeech;
     const Recognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
     if (!Recognition) {
-      setLocationNotice("Voice input is not available in this browser. Type instead.");
+      setVoiceNotice("Voice input is not supported in this browser. Use Chrome or Edge, or type instead.");
       return;
     }
     const recognition = new Recognition();
@@ -175,12 +182,34 @@ export default function Home() {
     recognition.onresult = event => {
       const transcript = event.results[0]?.[0]?.transcript ?? "";
       if (transcript) setReport(previous => previous ? `${previous} ${transcript}` : transcript);
+      setVoiceNotice("Voice captured. You can edit the text before continuing.");
     };
-    recognition.onend = () => setIsListening(false);
-    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => {
+      setIsListening(false);
+      recognitionRef.current = null;
+    };
+    recognition.onerror = event => {
+      setIsListening(false);
+      recognitionRef.current = null;
+      const message = event.error === "not-allowed" || event.error === "service-not-allowed"
+        ? "Microphone permission was blocked. Allow microphone access for this site, or type instead."
+        : event.error === "no-speech"
+          ? "No speech was detected. Tap the microphone and speak clearly, or type instead."
+          : event.error === "audio-capture"
+            ? "No microphone was found. Check your microphone, or type instead."
+            : "Voice input could not start. Type instead if needed.";
+      setVoiceNotice(message);
+    };
     recognitionRef.current = recognition;
     setIsListening(true);
-    recognition.start();
+    setVoiceNotice("Listening… speak now. You can stop and edit the text at any time.");
+    try {
+      recognition.start();
+    } catch {
+      setIsListening(false);
+      recognitionRef.current = null;
+      setVoiceNotice("Voice input could not start. Allow microphone access or type instead.");
+    }
   };
 
   const submitIncident = async (text = report) => {
@@ -292,6 +321,7 @@ export default function Home() {
             locationNotice={locationNotice}
             isLocating={isLocating}
             onLocation={requestLocation}
+            voiceNotice={voiceNotice}
             error={error}
           />
         )}
@@ -349,7 +379,7 @@ function ReadyScreen({ onStart, onDemo }: { onStart: () => void; onDemo: () => v
 function ReportScreen(props: {
   report: string; setReport: (value: string) => void; patientRelation: string; setPatientRelation: (value: string) => void;
   isListening: boolean; isSubmitting: boolean; onVoice: () => void; onSubmit: () => void; onUseDemo: () => void; onBack: () => void;
-  location: LocationState; locationNotice: string; isLocating: boolean; onLocation: () => void; error: string;
+  location: LocationState; locationNotice: string; isLocating: boolean; onLocation: () => void; voiceNotice: string; error: string;
 }) {
   return (
     <section className="mx-auto max-w-3xl">
@@ -362,7 +392,7 @@ function ReportScreen(props: {
         <div className="relative mt-2"><textarea id="incident-report" value={props.report} onChange={event => props.setReport(event.target.value)} placeholder="For example: Mere father ko saans lene mein bahut dikkat hai aur chest mein pain hai." className="min-h-44 w-full resize-none rounded-2xl border border-[#d9d5cc] bg-[#faf9f5] px-4 py-4 pr-16 text-base leading-7 text-[#202b2c] outline-none transition placeholder:text-[#9aa09b] focus:border-[#568a78] focus:ring-4 focus:ring-[#568a78]/10" />
           <button className={`absolute bottom-4 right-4 grid h-11 w-11 place-items-center rounded-full ${props.isListening ? "bg-[#e8505b] text-white" : "bg-[#dcebe0] text-[#286252]"}`} onClick={props.onVoice} aria-label={props.isListening ? "Stop listening" : "Speak your concern"}>{props.isListening ? <StopCircle size={20} /> : <Mic size={20} />}</button>
         </div>
-        <div className="mt-3 flex items-center gap-2 text-xs font-semibold text-[#79827f]"><Mic size={14} /> Voice works where supported · <button onClick={() => document.getElementById("incident-report")?.focus()} className="text-[#2e8069]">Type instead</button></div>
+        <div className="mt-3 flex items-start gap-2 text-xs font-semibold text-[#79827f]"><Mic size={14} className="mt-0.5 shrink-0" /><span>{props.voiceNotice || "Voice works in supported browsers over HTTPS. Allow microphone access when prompted."} · <button onClick={() => document.getElementById("incident-report")?.focus()} className="text-[#2e8069]">Type instead</button></span></div>
         <div className="mt-7 border-t border-[#ebe7df] pt-5"><div className="flex items-center justify-between gap-4"><div><p className="cb-label">Your location</p><p className="mt-1 text-sm text-[#65716d]">{props.locationNotice}</p></div><button className="cb-location-button" onClick={props.onLocation} disabled={props.isLocating}>{props.isLocating ? <RefreshCw size={16} className="animate-spin" /> : <LocateFixed size={16} />} {props.isLocating ? "Locating" : "Use my location"}</button></div><div className="mt-3 flex items-center gap-2 rounded-xl bg-[#f3f7ef] px-3 py-2 text-xs font-bold text-[#47705b]"><MapPin size={14} /> {props.location.label}</div></div>
         {props.error && <div className="mt-5 rounded-xl border border-[#f5b8b8] bg-[#fff3f2] px-4 py-3 text-sm font-semibold text-[#a7383f]">{props.error}</div>}
         <button className="cb-primary-action mt-7 w-full justify-center" onClick={props.onSubmit} disabled={props.isSubmitting}>{props.isSubmitting ? <><RefreshCw size={20} className="animate-spin" /> Building your handoff…</> : <>Continue to safe next steps <ArrowRight size={19} /></>}</button>
