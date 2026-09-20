@@ -81,8 +81,8 @@ export default function Home() {
   const [step, setStep] = useState<Step>("ready");
   const [report, setReport] = useState("");
   const [patientRelation, setPatientRelation] = useState("Father");
-  const [location, setLocation] = useState<LocationState>(DEMO_LOCATION);
-  const [locationNotice, setLocationNotice] = useState("Demo location is ready. You can use your location instead.");
+  const [location, setLocation] = useState<LocationState | null>(null);
+  const [locationNotice, setLocationNotice] = useState("Location has not been fetched yet. Tap Use my location to fetch it.");
   const [isLocating, setIsLocating] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [voiceNotice, setVoiceNotice] = useState("");
@@ -138,10 +138,13 @@ export default function Home() {
 
   const requestLocation = () => {
     if (!navigator.geolocation) {
-      setLocationNotice("Browser location is unavailable. Demo location remains active.");
+      setLocation(null);
+      setLocationNotice("Browser location is unavailable. No location was fetched; the emergency flow can use a demo fallback.");
       return;
     }
     setIsLocating(true);
+    setLocation(null);
+    setLocationNotice("Requesting your location… allow permission when your browser asks.");
     navigator.geolocation.getCurrentPosition(
       position => {
         setLocation({
@@ -150,12 +153,17 @@ export default function Home() {
           label: "Current browser location",
           source: "browser",
         });
-        setLocationNotice("Using your current browser location for approximate matching.");
+        setLocationNotice("Location fetched successfully. It will be used for approximate matching.");
         setIsLocating(false);
       },
-      () => {
-        setLocation(DEMO_LOCATION);
-        setLocationNotice("Location permission was not available. Demo location remains active.");
+      error => {
+        setLocation(null);
+        const message = error.code === error.PERMISSION_DENIED
+          ? "Location permission was denied. No location was fetched; you can continue with a demo fallback."
+          : error.code === error.TIMEOUT
+            ? "Location request timed out. No location was fetched; try again or continue with a demo fallback."
+            : "Location could not be fetched. Try again or continue with a demo fallback.";
+        setLocationNotice(message);
         setIsLocating(false);
       },
       { enableHighAccuracy: false, timeout: 7000, maximumAge: 300000 },
@@ -223,7 +231,7 @@ export default function Home() {
       const result = await postJson<IncidentRecord>("/api/incident", {
         rawText: text.trim(),
         patientRelation,
-        location,
+        ...(location ? { location } : {}),
       });
       setRecommendation(result);
       setStep("results");
@@ -238,7 +246,8 @@ export default function Home() {
   const shareLocation = async () => {
     if (!recommendation) return;
     const facility = recommendation.recommendedFacility;
-    const link = facility ? `https://www.google.com/maps/dir/?api=1&destination=${facility.latitude},${facility.longitude}` : `https://www.google.com/maps/search/?api=1&query=${location.latitude},${location.longitude}`;
+    const activeLocation = location ?? DEMO_LOCATION;
+    const link = facility ? `https://www.google.com/maps/dir/?api=1&destination=${facility.latitude},${facility.longitude}` : `https://www.google.com/maps/search/?api=1&query=${activeLocation.latitude},${activeLocation.longitude}`;
     const shareData = { title: "CareBridge emergency location", text: `${summaryText}\n\nDirections: ${link}`, url: link };
     await logAction("SHARE_LOCATION");
     try {
@@ -269,13 +278,16 @@ export default function Home() {
     if (!recommendation?.recommendedFacility) return;
     await logAction("NAVIGATE");
     const facility = recommendation.recommendedFacility;
-    window.open(`https://www.google.com/maps/dir/?api=1&origin=${location.latitude},${location.longitude}&destination=${facility.latitude},${facility.longitude}`, "_blank", "noopener,noreferrer");
+    const activeLocation = location ?? DEMO_LOCATION;
+    window.open(`https://www.google.com/maps/dir/?api=1&origin=${activeLocation.latitude},${activeLocation.longitude}&destination=${facility.latitude},${facility.longitude}`, "_blank", "noopener,noreferrer");
   };
 
   const reset = () => {
     setStep("ready");
     setRecommendation(null);
     setReport("");
+    setLocation(null);
+    setLocationNotice("Location has not been fetched yet. Tap Use my location to fetch it.");
     setError("");
     setCopied(false);
   };
@@ -283,6 +295,8 @@ export default function Home() {
   const start = () => {
     setStep("report");
     setReport("");
+    setLocation(null);
+    setLocationNotice("Location has not been fetched yet. Tap Use my location to fetch it.");
     setError("");
   };
 
@@ -304,7 +318,7 @@ export default function Home() {
       </header>
 
       <main className="mx-auto max-w-6xl px-4 pb-16 pt-8 sm:px-8 sm:pt-12">
-        {step === "ready" && <ReadyScreen onStart={start} onDemo={() => { setReport(DEMO_REPORT); setStep("report"); }} />}
+        {step === "ready" && <ReadyScreen onStart={start} onDemo={() => { setReport(DEMO_REPORT); setLocation(null); setLocationNotice("Location has not been fetched yet. Tap Use my location to fetch it."); setStep("report"); }} />}
         {step === "report" && (
           <ReportScreen
             report={report}
@@ -379,7 +393,7 @@ function ReadyScreen({ onStart, onDemo }: { onStart: () => void; onDemo: () => v
 function ReportScreen(props: {
   report: string; setReport: (value: string) => void; patientRelation: string; setPatientRelation: (value: string) => void;
   isListening: boolean; isSubmitting: boolean; onVoice: () => void; onSubmit: () => void; onUseDemo: () => void; onBack: () => void;
-  location: LocationState; locationNotice: string; isLocating: boolean; onLocation: () => void; voiceNotice: string; error: string;
+  location: LocationState | null; locationNotice: string; isLocating: boolean; onLocation: () => void; voiceNotice: string; error: string;
 }) {
   return (
     <section className="mx-auto max-w-3xl">
@@ -393,7 +407,7 @@ function ReportScreen(props: {
           <button className={`absolute bottom-4 right-4 grid h-11 w-11 place-items-center rounded-full ${props.isListening ? "bg-[#e8505b] text-white" : "bg-[#dcebe0] text-[#286252]"}`} onClick={props.onVoice} aria-label={props.isListening ? "Stop listening" : "Speak your concern"}>{props.isListening ? <StopCircle size={20} /> : <Mic size={20} />}</button>
         </div>
         <div className="mt-3 flex items-start gap-2 text-xs font-semibold text-[#79827f]"><Mic size={14} className="mt-0.5 shrink-0" /><span>{props.voiceNotice || "Voice works in supported browsers over HTTPS. Allow microphone access when prompted."} · <button onClick={() => document.getElementById("incident-report")?.focus()} className="text-[#2e8069]">Type instead</button></span></div>
-        <div className="mt-7 border-t border-[#ebe7df] pt-5"><div className="flex items-center justify-between gap-4"><div><p className="cb-label">Your location</p><p className="mt-1 text-sm text-[#65716d]">{props.locationNotice}</p></div><button className="cb-location-button" onClick={props.onLocation} disabled={props.isLocating}>{props.isLocating ? <RefreshCw size={16} className="animate-spin" /> : <LocateFixed size={16} />} {props.isLocating ? "Locating" : "Use my location"}</button></div><div className="mt-3 flex items-center gap-2 rounded-xl bg-[#f3f7ef] px-3 py-2 text-xs font-bold text-[#47705b]"><MapPin size={14} /> {props.location.label}</div></div>
+        <div className="mt-7 border-t border-[#ebe7df] pt-5"><div className="flex items-center justify-between gap-4"><div><p className="cb-label">Your location</p><p className="mt-1 text-sm text-[#65716d]">{props.locationNotice}</p></div><button className="cb-location-button" onClick={props.onLocation} disabled={props.isLocating}>{props.isLocating ? <RefreshCw size={16} className="animate-spin" /> : <LocateFixed size={16} />} {props.isLocating ? "Fetching" : props.location ? "Refresh location" : "Use my location"}</button></div>{props.location ? <div className="mt-3 rounded-xl bg-[#f3f7ef] px-3 py-2 text-xs font-bold text-[#47705b]"><div className="flex items-center gap-2"><MapPin size={14} /> {props.location.label}</div><p className="mt-1 pl-5 font-medium text-[#62806d]">{props.location.latitude.toFixed(5)}, {props.location.longitude.toFixed(5)}</p></div> : <div className="mt-3 rounded-xl border border-dashed border-[#d9d5cc] bg-[#faf9f5] px-3 py-3 text-xs font-semibold text-[#7b827e]">No location fetched yet. Your location will appear here after permission is granted.</div>}</div>
         {props.error && <div className="mt-5 rounded-xl border border-[#f5b8b8] bg-[#fff3f2] px-4 py-3 text-sm font-semibold text-[#a7383f]">{props.error}</div>}
         <button className="cb-primary-action mt-7 w-full justify-center" onClick={props.onSubmit} disabled={props.isSubmitting}>{props.isSubmitting ? <><RefreshCw size={20} className="animate-spin" /> Building your handoff…</> : <>Continue to safe next steps <ArrowRight size={19} /></>}</button>
       </div>
